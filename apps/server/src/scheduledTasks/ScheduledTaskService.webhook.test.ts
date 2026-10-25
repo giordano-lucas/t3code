@@ -1,3 +1,4 @@
+import * as ServerSettings from "../serverSettings.ts";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Crypto has no createHmac.
 import * as NodeCrypto from "node:crypto";
 
@@ -172,6 +173,7 @@ const withService = <A, E>(
     readonly relayHookBaseUrl?: string;
     readonly sql?: SqlClient.SqlClient;
     readonly workers?: Map<string, Effect.Effect<void>>;
+    readonly settingsLayer?: Layer.Layer<ServerSettings.ServerSettingsService>;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -255,7 +257,11 @@ const withService = <A, E>(
       return yield* body({ service, launches, sql, secretsByRef });
     }).pipe(
       Effect.provide(
-        Layer.fresh(ScheduledTaskService.layer.pipe(Layer.provide(layerDependencies))),
+        Layer.fresh(
+          ScheduledTaskService.layer
+            .pipe(Layer.provide(options.settingsLayer ?? ServerSettings.layerTest()))
+            .pipe(Layer.provide(layerDependencies)),
+        ),
       ),
     );
   }).pipe(
@@ -1888,3 +1894,74 @@ it.effect("filters run before replay and coalescing without claiming ignored del
     { workers },
   );
 });
+
+it.effect("persists accepted webhooks until work explicitly resumes", () =>
+  Effect.gen(function* () {
+    const settings = yield* ServerSettings.ServerSettingsService;
+    yield* settings.updateSettings({ workPaused: true });
+    const workers = new Map<string, Effect.Effect<void>>();
+    yield* withService(
+      ({ service, launches, sql }) =>
+        Effect.gen(function* () {
+          const { task } = yield* service.upsert(yield* webhookTaskInput());
+          const accepted = yield* service.triggerWebhook(requestFor(task));
+          assert.equal(accepted._tag, "accepted");
+          const pending = yield* sql<{
+            state: string;
+          }>`SELECT state FROM scheduled_task_webhook_pending WHERE task_id = ${task.id}`;
+          assert.deepEqual(
+            pending.map((row) => row.state),
+            ["pending"],
+          );
+          assert.equal(yield* Queue.size(launches), 0);
+          yield* workers.get("webhook-coalescing")!;
+          assert.equal(yield* Queue.size(launches), 0);
+          assert.equal((yield* service.list()).tasks[0]?.runCount, 0);
+          yield* settings.updateSettings({ workPaused: false });
+          yield* workers.get("webhook-coalescing")!;
+          const launched = yield* Queue.take(launches);
+          assert.include(
+            launched.initialMessage?.text ?? "",
+            "https://github.com/org/repo/pull/45",
+          );
+          assert.equal(yield* Queue.size(launches), 0);
+        }),
+      { workers, settingsLayer: Layer.succeed(ServerSettings.ServerSettingsService, settings) },
+    );
+  }).pipe(Effect.provide(ServerSettings.layerTest())),
+);
+
+it.effect(
+  "holds due interval triggers and manual runs without consuming them while work is paused",
+  () =>
+    Effect.gen(function* () {
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const workers = new Map<string, Effect.Effect<void>>();
+      yield* withService(
+        ({ service, launches }) =>
+          Effect.gen(function* () {
+            const { task } = yield* service.upsert(
+              yield* webhookTaskInput({
+                prompt: "Review open PRs",
+                schedule: { type: "interval", everyMs: 60_000 },
+              }),
+            );
+            yield* settings.updateSettings({ workPaused: true });
+            yield* TestClock.adjust("1 minute");
+            yield* workers.get("scheduled-tasks")!;
+            const manual = yield* service.runNow({ id: task.id }).pipe(Effect.result);
+            assert.equal(manual._tag, "Failure");
+            const held = (yield* service.list()).tasks[0]!;
+            assert.equal(held.runCount, 0);
+            assert.equal(held.nextRunAt, task.nextRunAt);
+            assert.equal(yield* Queue.size(launches), 0);
+            yield* settings.updateSettings({ workPaused: false });
+            yield* workers.get("scheduled-tasks")!;
+            assert.equal((yield* Queue.take(launches)).initialMessage?.text, "Review open PRs");
+            assert.equal((yield* service.list()).tasks[0]?.runCount, 1);
+            assert.equal(yield* Queue.size(launches), 0);
+          }),
+        { workers, settingsLayer: Layer.succeed(ServerSettings.ServerSettingsService, settings) },
+      );
+    }).pipe(Effect.provide(ServerSettings.layerTest())),
+);

@@ -1,7 +1,10 @@
+import * as Crypto from "expo-crypto";
 import * as Dialog from "../../components/ui/Dialog";
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import {
+  CommandId,
+  type OrchestrationV2WorkControlResult,
   AuthProvidersManageScope,
   AuthOrchestrationReadScope,
   type EnvironmentId,
@@ -18,6 +21,7 @@ import { ProviderIcon } from "../../components/ProviderIcon";
 import { ScreenScrollView } from "../../components/ui/ScreenScrollView";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { environmentPresentations } from "../../state/presentation";
+import { threadEnvironment } from "../../state/threads";
 import { serverEnvironment } from "../../state/server";
 import { environmentSession, useEnvironmentScope, readEnvironmentScope } from "../../state/session";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -62,6 +66,9 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
   const outdated =
     useAtomValue(environmentPresentations.presentationAtom(environmentId))?.entry
       .serverUpdateRequired === true;
+  const controlWork = useAtomCommand(threadEnvironment.controlWork);
+  const canControlWork = useAtomValue(threadEnvironment.controlWork.permissionAtom(environmentId));
+  const [workStatus, setWorkStatus] = useState<OrchestrationV2WorkControlResult | null>(null);
   const updateServer = useAtomCommand(serverEnvironment.updateServer);
   const updateProvider = useAtomCommand(serverEnvironment.updateProvider);
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders);
@@ -230,6 +237,65 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
             {notice ? <Text className="px-2 text-sm text-foreground-muted">{notice}</Text> : null}
             {config && !outdated ? (
               <>
+                {capabilities?.workPause ? (
+                  <SettingsSection title="Agent work">
+                    <View className="gap-1 p-4">
+                      <Text className="text-sm text-foreground-muted">
+                        Wait for current turns and recovery checkpoints before restarting. Work
+                        stays paused across restarts. Native subagents may need recovery from saved
+                        notes.
+                      </Text>
+                      {workStatus?.threads.map((thread) => (
+                        <Text key={thread.threadId} className="text-sm text-foreground-muted">
+                          {thread.title}: {thread.status.replaceAll("_", " ")}
+                          {thread.checkpointSaved ? " (checkpoint saved)" : ""}
+                        </Text>
+                      ))}
+                    </View>
+                    {(
+                      [
+                        {
+                          action: config.settings.workPaused ? "resume" : "pause",
+                          label: config.settings.workPaused ? "Resume all work" : "Pause all work",
+                          immediate: false,
+                        },
+                        ...(config.settings.workPaused
+                          ? [
+                              {
+                                action: "pause",
+                                label: "Stop immediately without a fresh checkpoint",
+                                immediate: true,
+                              },
+                            ]
+                          : []),
+                        { action: "status", label: "Check pause status", immediate: false },
+                      ] as const
+                    ).map((item) => (
+                      <SettingsActionRow
+                        key={item.label}
+                        icon="stop.fill"
+                        label={item.label}
+                        disabled={busy || !canControlWork}
+                        onPress={() =>
+                          void run("work", async () => {
+                            const result = await controlWork({
+                              environmentId,
+                              input: {
+                                commandId: CommandId.make(Crypto.randomUUID()),
+                                action: item.action as "pause" | "resume" | "status",
+                                all: true,
+                                immediate: item.immediate,
+                              },
+                            });
+                            if (AsyncResult.isFailure(result))
+                              throw squashAtomCommandFailure(result);
+                            if (AsyncResult.isSuccess(result)) setWorkStatus(result.value);
+                          })
+                        }
+                      />
+                    ))}
+                  </SettingsSection>
+                ) : null}
                 <SettingsSection title="T3 Code">
                   <View className="gap-1 p-4">
                     <Text className="text-base text-foreground">Version {version}</Text>

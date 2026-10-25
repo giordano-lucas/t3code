@@ -1629,6 +1629,7 @@ export function threadShellFromProjection(
     pullRequests: projection.thread.pullRequests,
   });
   return {
+    workPause: projection.thread.workPause,
     createdBy: projection.thread.createdBy,
     creationSource: projection.thread.creationSource,
     id: projection.thread.id,
@@ -1925,6 +1926,7 @@ function shellFromState(input: {
     lineage: input.state.thread.lineage,
     forkedFrom: input.state.thread.forkedFrom,
     activeProviderThreadId: input.state.thread.activeProviderThreadId,
+    workPause: input.state.thread.workPause,
     ...(input.state.thread.historyOrigin === undefined
       ? {}
       : { historyOrigin: input.state.thread.historyOrigin }),
@@ -5262,7 +5264,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             AND NOT EXISTS (SELECT 1 FROM orchestration_v2_projection_runs
               WHERE thread_id = ${threadId}
                 AND (status IN ('preparing', 'starting', 'running', 'waiting')
-                  OR (status = 'queued' AND json_extract(payload_json, '$.queueHeld') = 1)))`;
+                  OR (status = 'queued' AND json_extract(payload_json, '$.queueHeld') = 1
+                    AND json_extract(thread.payload_json, '$.workPause') IS NULL)))`;
             return rows.length > 0;
           }),
         )
@@ -7480,7 +7483,9 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
               run.status === "starting" ||
               run.status === "running" ||
               run.status === "waiting" ||
-              (run.status === "queued" && run.queueHeld === true),
+              (run.status === "queued" &&
+                run.queueHeld === true &&
+                projection.thread.workPause == null),
           )
         );
       }),

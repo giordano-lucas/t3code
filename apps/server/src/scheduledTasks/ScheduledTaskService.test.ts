@@ -1,3 +1,4 @@
+import * as ServerSettings from "../serverSettings.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as NodeUtil from "node:util";
 
@@ -187,7 +188,7 @@ it.effect(
         Effect.gen(function* () {
           yield* Layer.build(
             Layer.provideMerge(
-              ScheduledTaskService.layer,
+              ScheduledTaskService.layer.pipe(Layer.provide(ServerSettings.layerTest())),
               Layer.mergeAll(
                 Layer.mock(ThreadLaunchService.ThreadLaunchService)({
                   launch: () =>
@@ -280,7 +281,7 @@ it.effect(
         Effect.gen(function* () {
           yield* Layer.build(
             Layer.provideMerge(
-              ScheduledTaskService.layer,
+              ScheduledTaskService.layer.pipe(Layer.provide(ServerSettings.layerTest())),
               Layer.mergeAll(
                 Layer.mock(ThreadLaunchService.ThreadLaunchService)({
                   launch: () =>
@@ -343,7 +344,7 @@ it.effect("thread cleanup notifies subscribers and a finishing run cannot recrea
     const subscribed = yield* Deferred.make<void>();
     const running = yield* Deferred.make<void>();
     const removed = yield* Deferred.make<void>();
-    const layer = ScheduledTaskService.layer.pipe(
+    const layer = ScheduledTaskService.layer.pipe(Layer.provide(ServerSettings.layerTest())).pipe(
       Layer.provide(
         Layer.mergeAll(
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),

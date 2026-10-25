@@ -1,3 +1,4 @@
+import { WorkPauseControls } from "./WorkPauseControls";
 import { SettingsGroup } from "./SettingsGroup";
 import { NotificationSettings } from "./NotificationSettings";
 import { PRIVACY_POLICY_URL } from "../../legalLinks";
@@ -1587,6 +1588,7 @@ export function GeneralSettingsPanel() {
           }
         />
 
+        <WorkPauseControls />
         <BackgroundActivitySettingsRow />
       </SettingsSection>
 

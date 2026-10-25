@@ -118,6 +118,22 @@ export const layerExecutor: Layer.Layer<
               ),
             );
           }
+          case "work.pause.settle":
+            return threads
+              .settleWorkPause({
+                threadId: effect.threadId,
+                requestId: effect.request.requestId,
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
+                ),
+              );
           case "provider-session.detach":
             return providerSessions
               .detach({

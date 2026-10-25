@@ -61,6 +61,42 @@ Updates from the previous orchestration system preserve conversation transcripts
 every kind of runtime history forward. Read [Threads from older T3 Code versions](./thread-migration.md)
 before continuing an important older thread.
 
+## Pause work before a restart
+
+In **Settings → General → Pause agent work**, choose **Pause all work** on the
+machine running your agents. On mobile, use the agent work controls in that
+machine's environment details. Graceful pause waits for each current turn,
+then asks the agent to save a recovery checkpoint. Check pause status and wait
+until every listed thread says **paused** before restarting. If a turn cannot
+finish, **Stop immediately** interrupts it without a fresh checkpoint.
+
+The pause survives app and machine restarts, including when automatic restart
+continuation is enabled. Choose **Resume all work** when you are ready. T3 keeps
+the parent and its T3-owned child conversations and task identities, and asks
+them to reconcile files and remote jobs before continuing. Checkpoint failure
+or a restart before checkpointing finishes needs attention; use immediate stop
+and inspect the conversation before resuming.
+
+From zsh or another shell on that machine:
+
+```sh
+t3 work pause --all
+t3 work status --all
+# Restart the app or Mac once all listed work is paused.
+t3 work resume --all
+```
+
+Replace `--all` with `--thread <thread-id>` to control one conversation and its
+T3-owned children. Add `--immediate` to pause without waiting for a checkpoint,
+or `--json` for scripts. The CLI and server must both support these commands.
+
+Pausing preserves conversation history and recovery instructions, not a live
+process snapshot. Provider-native subagents cannot always resume with their
+original internal state. Terminal processes and remote jobs need reconciliation;
+pausing T3 does not suspend every process or remote service an agent started.
+Scheduled triggers wait while the environment is paused, and accepted webhook
+requests remain queued for later dispatch.
+
 ## When versions don't match
 
 A client and server must speak the same orchestration protocol. If they do not, the connection is

@@ -11,10 +11,12 @@ import * as Duration from "effect/Duration";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import {
+  CommandId,
   ForwardCompatibleNullable,
   ForwardCompatibleOptional,
   OmittedWhenNull,
   ProjectId,
+  RunId,
   ThreadId,
   TrimmedNonEmptyString,
   TrimmedString,
@@ -1100,6 +1102,14 @@ export const StorageCleanupSettings = Schema.Struct({
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
+const WorkPauseTargets = Schema.NullOr(
+  Schema.Struct({
+    requestId: CommandId,
+    threadIds: Schema.Array(ThreadId),
+    resumeRunIds: Schema.Record(ThreadId, RunId),
+  }),
+);
+
 export const ServerSettings = Schema.Struct({
   // Null means unmigrated; empty is authoritative and must not resurrect cleared preferences.
   favorites: Schema.NullOr(ModelFavorites).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
@@ -1120,6 +1130,8 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed("paragraph" as const)),
   ),
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  workPaused: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  workPauseTargets: WorkPauseTargets.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   continueThreadsAfterServerUpdate: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(true)),
   ),
@@ -1473,6 +1485,8 @@ export const ServerSettingsPatch = Schema.Struct({
   worktreesDirectory: Schema.optionalKey(TrimmedString),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
+  workPaused: Schema.optionalKey(Schema.Boolean),
+  workPauseTargets: Schema.optionalKey(WorkPauseTargets),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),
   projectAgentBrowserAccessOverrides: Schema.optionalKey(

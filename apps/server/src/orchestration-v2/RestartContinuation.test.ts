@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import {
+  CommandId,
   MessageId,
   NodeId,
   ProjectId,
@@ -479,6 +480,15 @@ it.effect("does not duplicate delivery and yields to newer user work or opt-out"
         Layer.merge(
           layerThreads,
           ServerSettings.layerTest({ continueThreadsAfterServerUpdate: false }),
+        ),
+      ),
+    );
+    assert.lengthOf(commands, 1);
+    yield* continueRestartedRun({ threadId, sourceRunId: runId }).pipe(
+      Effect.provide(
+        Layer.merge(
+          layerThreads,
+          ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true, workPaused: true }),
         ),
       ),
     );
@@ -1093,6 +1103,14 @@ it.effect("does not wake a snoozed or settled thread, but continues once a snooz
     for (const held of [
       { snoozedUntil: DateTime.add(now, { days: 1 }) },
       { settledOverride: "settled" as const },
+      {
+        workPause: {
+          requestId: CommandId.make("pause:restart"),
+          phase: "paused" as const,
+          checkpointMessageId: null,
+          resumeRunId: runId,
+        },
+      },
     ]) {
       const thread = { ...live.thread, ...held };
       assert.isUndefined(restartContinuationRun({ ...live, thread }, now));

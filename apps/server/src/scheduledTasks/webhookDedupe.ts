@@ -126,3 +126,22 @@ const encodePendingRequest = Schema.encodeEffect(PendingRequestJson);
 export const decodePendingRequest = Schema.decodeUnknownEffect(PendingRequestJson);
 export const dedupeError = (cause: unknown) =>
   new ScheduledTaskError({ message: "Could not persist webhook dedupe state.", cause });
+
+export const parkWebhookDelivery = Effect.fn("ScheduledTaskService.parkWebhookDelivery")(function* (
+  task: ScheduledTask,
+  deliveryId: string,
+  request: WebhookRequest,
+  now: number,
+) {
+  const sql = yield* SqlClient.SqlClient;
+  const requestJson = yield* encodePendingRequest({
+    method: request.method,
+    path: request.path,
+    query: request.query,
+    headers: request.headers,
+    bodyText: request.bodyText,
+  });
+  yield* sql`INSERT OR IGNORE INTO scheduled_task_webhook_pending
+    (delivery_id, task_id, coalesce_key, due_at, task_json, request_json, delivery_ids_json)
+    VALUES (${deliveryId}, ${task.id}, ${deliveryId}, ${now}, ${yield* encodePendingTask(task)}, ${requestJson}, json_array(${deliveryId}))`;
+});

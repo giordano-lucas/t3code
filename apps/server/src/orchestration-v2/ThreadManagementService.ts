@@ -11,6 +11,9 @@ import type {
 import {
   type ChatAttachment,
   CommandId,
+  type ServerSettingsError,
+  type OrchestrationV2WorkControlInput,
+  type OrchestrationV2WorkControlResult,
   MessageId,
   OrchestrationV2StopWorkflowError,
   type OrchestrationV2StopWorkflowInput,
@@ -45,6 +48,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
@@ -332,6 +336,20 @@ export type ThreadManagementError = typeof ThreadManagementError.Type;
 type ThreadManagementFailure = ThreadManagementError | Orchestrator.OrchestratorV2Error;
 
 export interface ThreadManagementServiceShape {
+  readonly controlWork: (
+    input: OrchestrationV2WorkControlInput,
+  ) => Effect.Effect<
+    OrchestrationV2WorkControlResult,
+    ThreadManagementFailure | ServerSettingsError
+  >;
+  readonly settleWorkPause: (input: {
+    readonly threadId: ThreadId;
+    readonly requestId: CommandId;
+  }) => Effect.Effect<
+    void,
+    ThreadManagementFailure | ProviderSessionManager.ProviderSessionManagerV2Error
+  >;
+
   readonly searchThreadStream: (
     input: OrchestrationV2SearchThreadInput,
   ) => Stream.Stream<OrchestrationV2SearchThreadResult, Orchestrator.OrchestratorV2Error>;
@@ -1199,7 +1217,290 @@ const make = Effect.gen(function* () {
     if (failures[0] !== undefined) return yield* Effect.fail(failures[0]);
   });
 
+  const workControlPermit = yield* Semaphore.make(1);
+  const hasWorkCheckpoint = Effect.fn("ThreadManagementService.hasWorkCheckpoint")(function* (
+    threadId: ThreadId,
+    runId: RunId,
+  ) {
+    const { messages } = yield* orchestrator.getThreadRecords(threadId, ["messages"], {
+      messageRoles: ["assistant"],
+      messageRunIds: [runId],
+    });
+    return messages.some((message) => !message.streaming && message.text.trim().length > 0);
+  });
+  const settleWorkPauseUnlocked: ThreadManagementServiceShape["settleWorkPause"] = Effect.fn(
+    "ThreadManagementService.settleWorkPause",
+  )(function* (input) {
+    const projection = yield* orchestrator.getThreadRecords(input.threadId, [
+      "providerSessions",
+      "runs",
+    ]);
+    if (
+      projection.thread.workPause?.requestId !== input.requestId ||
+      projection.thread.workPause.phase === "paused"
+    )
+      return;
+    if (projection.thread.workPause.phase === "checkpointing") {
+      const checkpoint = projection.runs.find(
+        (run) => run.userMessageId === projection.thread.workPause!.checkpointMessageId,
+      );
+      if (
+        checkpoint?.status !== "completed" ||
+        !(yield* hasWorkCheckpoint(input.threadId, checkpoint.id))
+      )
+        return;
+    }
+    for (const session of projection.providerSessions) {
+      if (session.status === "stopped" || session.status === "error") continue;
+      yield* sessions.detach({
+        threadId: input.threadId,
+        providerSessionId: session.id,
+        detail: "Work paused by user",
+      });
+    }
+    const updated = yield* orchestrator.getThreadRecords(input.threadId, ["runs"]);
+    if (
+      updated.runs.some((run) =>
+        ["preparing", "starting", "running", "waiting"].includes(run.status),
+      )
+    )
+      return;
+    yield* dispatch({
+      type: "thread.work.paused",
+      threadId: input.threadId,
+      requestId: input.requestId,
+      commandId: CommandId.make(`command:work-paused:${input.requestId}`),
+    });
+  });
+  const settleWorkPause: ThreadManagementServiceShape["settleWorkPause"] = (input) =>
+    workControlPermit.withPermits(1)(settleWorkPauseUnlocked(input));
+
+  const controlWork: ThreadManagementServiceShape["controlWork"] = Effect.fn(
+    "ThreadManagementService.controlWork",
+  )(function* (input) {
+    const settings = serverSettings;
+    const receipt = yield* receipts.getByCommandId(input.commandId).pipe(
+      Effect.mapError(
+        (cause) =>
+          new Orchestrator.OrchestratorDispatchError({
+            commandId: input.commandId,
+            commandType: `work.${input.action}`,
+            cause,
+          }),
+      ),
+    );
+    const action = Option.isSome(receipt) ? "status" : input.action;
+    if ((input.all === true) === (input.threadId !== undefined)) {
+      return yield* new Orchestrator.OrchestratorDispatchError({
+        commandId: input.commandId,
+        commandType: "thread.work.pause",
+        cause: "Choose either all work or one thread.",
+      });
+    }
+    const current = yield* settings.getSettings;
+    if (action === "resume" && !input.all && current.workPaused) {
+      return yield* new Orchestrator.OrchestratorDispatchError({
+        commandId: input.commandId,
+        commandType: "thread.work.resume",
+        cause: "The environment is paused. Resume all work first.",
+      });
+    }
+    const snapshot = yield* orchestrator.getShellSnapshot();
+    const ids =
+      input.threadId === undefined
+        ? [
+            ...snapshot.threads
+              .filter(
+                (thread) =>
+                  thread.workPause != null ||
+                  ["preparing", "starting", "running", "waiting", "queued"].includes(
+                    thread.status,
+                  ) ||
+                  (thread.pendingBackgroundTasks?.length ?? 0) > 0,
+              )
+              .map((thread) => thread.id),
+            ...(current.workPauseTargets?.threadIds ?? []),
+            ...(yield* orchestrator.listActiveSubagentThreadIds()),
+          ]
+        : [input.threadId];
+    const resumeRunIds = { ...current.workPauseTargets?.resumeRunIds };
+    if (action === "pause") {
+      for (const thread of snapshot.threads) {
+        const source =
+          thread.activeRunId ??
+          ((thread.pendingBackgroundTasks?.length ?? 0) > 0 ? thread.latestRunId : null);
+        if (source !== null && thread.workPause == null) resumeRunIds[thread.id] = source;
+      }
+    }
+    if (input.all && action === "pause")
+      yield* settings.updateSettings({
+        workPaused: true,
+        workPauseTargets: { requestId: input.commandId, threadIds: ids, resumeRunIds },
+      });
+    const visited = new Set<ThreadId>();
+    const ordered: Array<ThreadId> = [];
+    const visit = Effect.fn("ThreadManagementService.visitWorkTree")(function* (
+      threadId: ThreadId,
+    ): Effect.fn.Return<void, ThreadManagementFailure> {
+      if (visited.has(threadId)) return;
+      visited.add(threadId);
+      const { thread } = yield* orchestrator.getThreadRecords(threadId, []);
+      if (thread.deletedAt !== null || thread.archivedAt !== null) return;
+      if (action === "pause")
+        yield* dispatch({
+          type: "thread.work.pause",
+          threadId,
+          commandId: CommandId.make(`${input.commandId}:${threadId}`),
+          immediate: input.immediate ?? false,
+        });
+      const { subagents } = yield* orchestrator.getThreadRecords(threadId, ["subagents"]);
+      for (const task of subagents) {
+        if (task.origin === "app_owned" && task.childThreadId !== null && task.result === null)
+          yield* visit(task.childThreadId);
+      }
+      ordered.push(threadId);
+    });
+    for (const id of ids) yield* visit(id);
+    if (input.all && action === "pause")
+      yield* settings.updateSettings({
+        workPaused: true,
+        workPauseTargets: { requestId: input.commandId, threadIds: ordered, resumeRunIds },
+      });
+    if (input.all && action === "resume") {
+      yield* settings.updateSettings({
+        workPauseTargets: {
+          requestId: current.workPauseTargets?.requestId ?? input.commandId,
+          threadIds: ordered,
+          resumeRunIds,
+        },
+      });
+      for (const threadId of ordered) {
+        const projection = yield* orchestrator.getThreadRecords(threadId, []);
+        if (
+          !current.workPaused ||
+          projection.thread.workPause != null ||
+          projection.thread.deletedAt !== null ||
+          projection.thread.archivedAt !== null
+        )
+          continue;
+        yield* dispatch({
+          type: "thread.work.pause",
+          threadId,
+          immediate: true,
+          commandId: CommandId.make(
+            `${current.workPauseTargets?.requestId ?? input.commandId}:${threadId}`,
+          ),
+        });
+        const held = yield* orchestrator.getThreadRecords(threadId, []);
+        if (held.thread.workPause != null)
+          yield* settleWorkPauseUnlocked({
+            threadId,
+            requestId: held.thread.workPause.requestId,
+          }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new Orchestrator.OrchestratorDispatchError({
+                  commandId: input.commandId,
+                  commandType: "thread.work.resume",
+                  cause,
+                }),
+            ),
+          );
+      }
+    }
+    if (action === "resume") {
+      for (const threadId of ordered) {
+        const projection = yield* orchestrator.getThreadRecords(threadId, ["runs"]);
+        if (
+          projection.thread.workPause != null &&
+          (projection.thread.workPause.phase !== "paused" ||
+            projection.runs.some((run) =>
+              ["preparing", "starting", "running", "waiting"].includes(run.status),
+            ))
+        ) {
+          return yield* new Orchestrator.OrchestratorDispatchError({
+            commandId: input.commandId,
+            commandType: "thread.work.resume",
+            cause: `Thread ${threadId} has not finished pausing.`,
+          });
+        }
+      }
+      if (input.all) yield* settings.updateSettings({ workPaused: false });
+    }
+    if (action === "resume") {
+      for (const threadId of ordered)
+        yield* dispatch({
+          type: "thread.work.resume",
+          commandId: CommandId.make(`${input.commandId}:${threadId}`),
+          threadId,
+        });
+    }
+    if (action === "resume") {
+      if (input.all) yield* settings.updateSettings({ workPauseTargets: null });
+      yield* orchestrator.resumeQueuedRuns;
+      yield* orchestrator.recoverDelegatedTasks;
+    }
+    const latestSettings = yield* settings.getSettings;
+    const threads: Array<OrchestrationV2WorkControlResult["threads"][number]> = [];
+    for (const threadId of ordered) {
+      const projection = yield* orchestrator.getThreadRecords(threadId, ["runs"]);
+      const pause = projection.thread.workPause;
+      const checkpoint = projection.runs.find(
+        (run) => run.userMessageId === pause?.checkpointMessageId,
+      );
+      const live = projection.runs.some((run) =>
+        ["preparing", "starting", "running", "waiting"].includes(run.status),
+      );
+      const checkpointSaved =
+        checkpoint?.status === "completed" && (yield* hasWorkCheckpoint(threadId, checkpoint.id));
+      threads.push({
+        threadId,
+        title: projection.thread.title,
+        checkpointSaved,
+        status:
+          pause == null
+            ? latestSettings.workPaused &&
+              latestSettings.workPauseTargets?.threadIds.includes(threadId)
+              ? "needs_attention"
+              : "running"
+            : checkpoint !== undefined &&
+                (["failed", "interrupted", "cancelled"].includes(checkpoint.status) ||
+                  (checkpoint.status === "completed" && !checkpointSaved))
+              ? "needs_attention"
+              : pause.phase === "checkpointing"
+                ? "checkpointing"
+                : live || pause.phase === "stopping"
+                  ? "stopping"
+                  : "paused",
+      });
+    }
+    if (action !== "status")
+      yield* receipts
+        .insertIfAbsent({
+          commandId: input.commandId,
+          threadId: input.threadId ?? ThreadId.make("thread:environment-work-control"),
+          commandType: `work.${action}`,
+          acceptedAt: yield* DateTime.now,
+          resultSequence: 0,
+          status: "accepted",
+          error: null,
+        })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new Orchestrator.OrchestratorDispatchError({
+                commandId: input.commandId,
+                commandType: `work.${action}`,
+                cause,
+              }),
+          ),
+        );
+    return { allPaused: latestSettings.workPaused, threads };
+  }, workControlPermit.withPermits(1));
+
   return ThreadManagementService.of({
+    controlWork,
+    settleWorkPause,
     ensureLegacyTranscript,
     searchThreadStream: (input) =>
       Stream.unwrap(

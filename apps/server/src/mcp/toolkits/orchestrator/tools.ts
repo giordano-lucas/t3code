@@ -1,5 +1,7 @@
 import {
   OrchestratorMcpCapabilitiesInput,
+  OrchestrationV2WorkControlInput,
+  OrchestrationV2WorkControlResult,
   OrchestratorMcpCapabilitiesResult,
   OrchestrationV2StopWorkflowInput,
   OrchestratorMcpCreateThreadsInput,
@@ -51,6 +53,18 @@ const threadMetadataDependencies = [
   ThreadManagementService.ThreadManagementService,
   ThreadMetadataMcpService.ThreadMetadataMcpService,
 ];
+
+const WorkControlTool = Tool.make("t3_work_control", {
+  description:
+    "Pause, resume, or inspect work on this environment. Choose all:true or a threadId (includes its T3-owned children). Pause waits for the current turn, saves a recovery checkpoint, and stays paused across restarts. immediate:true interrupts without a fresh checkpoint. Only status paused means ready to restart; native subagents cannot be restored exactly.",
+  parameters: OrchestrationV2WorkControlInput,
+  success: OrchestrationV2WorkControlResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Control paused work")
+  .annotate(Tool.Destructive, false);
 
 const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
   description:
@@ -310,6 +324,7 @@ export const OrchestratorToolkit = Toolkit.make(
   ThreadReadTool,
   ThreadUpdateTool,
   ThreadSendTool,
+  WorkControlTool,
   ThreadWaitTool,
   ThreadInterruptTool,
 );
