@@ -715,6 +715,7 @@ export const make = Effect.gen(function* () {
       );
       const enabled =
         continueAfterRestart !== null &&
+        !continueAfterRestart.workPaused &&
         resolveProjectSettings(continueAfterRestart, projection.thread.projectId).settings
           .continueThreadsAfterServerUpdate;
       const result = yield* reconcileProjection(projection, trigger, enabled, stoppedThisPass);
@@ -755,7 +756,7 @@ export const make = Effect.gen(function* () {
         )
           return;
         const run = restartContinuationRun(projection, yield* DateTime.now);
-        if (!run) return;
+        if (!run || (yield* settings.getSettings).workPaused) return;
         const commandId = CommandId.make(`command:restart-prepare:${run.id}`);
         yield* eventSink.writeWithEffects({
           commandId,

@@ -43,6 +43,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import * as ServerSettings from "../serverSettings.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as Metrics from "../observability/Metrics.ts";
@@ -58,6 +59,7 @@ import {
 } from "./webhookTemplate.ts";
 import {
   acceptWebhookDedupe,
+  parkWebhookDelivery,
   acceptImmediateWebhookDedupe,
   releaseWebhookReplay,
   decodePendingTask,
@@ -113,6 +115,8 @@ export class ScheduledTaskWebhookOrigin extends Context.Reference<Effect.Effect<
     defaultValue: () => Effect.succeed({ relayHookBaseUrl: null }),
   },
 ) {}
+
+class WorkPaused extends Data.TaggedError("WorkPaused") {}
 
 class WebhookDeliverySkipped extends Data.TaggedError("WebhookDeliverySkipped")<{
   readonly reason: string;
@@ -400,6 +404,7 @@ export const layer = Layer.effect(
     const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
     const secretRequests = yield* SecretRequests.SecretRequests;
     const scheduler = yield* Scheduler.Scheduler;
+    const settings = yield* ServerSettings.ServerSettingsService;
     const readWebhookOrigin = yield* ScheduledTaskWebhookOrigin;
     const webhookPermits = yield* Ref.make<ReadonlyMap<ScheduledTaskId, Semaphore.Semaphore>>(
       new Map(),
@@ -721,6 +726,16 @@ export const layer = Layer.effect(
         readonly dispatched: Ref.Ref<boolean>;
       },
     ) {
+      if (
+        (yield* settings.getSettings.pipe(
+          Effect.mapError((cause) => taskError("Could not read work pause state.", { cause })),
+        )).workPaused
+      ) {
+        if (trigger === "webhook") return yield* new WorkPaused();
+        return yield* taskError("Work is paused. Resume work before running a scheduled task.", {
+          taskId: task.id,
+        });
+      }
       const reserved = yield* Ref.modify(activeRuns, (active) => {
         if (active.has(task.id)) return [false, active] as const;
         const next = new Set(active);
@@ -940,6 +955,7 @@ export const layer = Layer.effect(
     });
 
     const runDueTasks = Effect.fn("ScheduledTaskService.runDueTasks")(function* () {
+      if ((yield* settings.getSettings.pipe(Effect.orDie)).workPaused) return;
       const now = yield* localNow;
       const tasks = yield* listDueTasks(now).pipe(
         Effect.mapError((cause) => taskError("Could not list schedule tasks.", { cause })),
@@ -1565,6 +1581,7 @@ export const layer = Layer.effect(
       task: ScheduledTask,
       deliveryId: string,
       prompt: string,
+      request?: WebhookRequest,
     ) {
       const runOutcome = (outcome: "started" | "skipped" | "failed") =>
         Effect.all([
@@ -1589,6 +1606,22 @@ export const layer = Layer.effect(
             ),
         }),
         Effect.as(true),
+        Effect.catchTags({
+          WorkPaused: () =>
+            Effect.gen(function* () {
+              if (request !== undefined)
+                yield* parkWebhookDelivery(
+                  task,
+                  deliveryId,
+                  request,
+                  DateTime.toEpochMillis(yield* localNow),
+                ).pipe(
+                  Effect.provideService(SqlClient.SqlClient, sql),
+                  Effect.mapError(dedupeError),
+                );
+              return false;
+            }),
+        }),
         // Dispatch success owns the replay key even if later bookkeeping fails.
         Effect.catchCause((cause) =>
           Effect.gen(function* () {
@@ -2018,8 +2051,17 @@ export const layer = Layer.effect(
             } as const);
           }
           yield* observe("accepted");
+          if ((yield* settings.getSettings.pipe(Effect.mapError(dedupeError))).workPaused) {
+            yield* parkWebhookDelivery(task, deliveryId, request, DateTime.toEpochMillis(now)).pipe(
+              Effect.provideService(SqlClient.SqlClient, sql),
+              Effect.mapError(dedupeError),
+            );
+            yield* release;
+            claimAcquired = false;
+            return { _tag: "accepted" as const, deliveryId, outcome: "accepted" as const };
+          }
           const permit = yield* webhookPermit(task.id);
-          yield* runWebhookDelivery(task, deliveryId, rendered.prompt).pipe(
+          yield* runWebhookDelivery(task, deliveryId, rendered.prompt, request).pipe(
             permit.withPermits(1),
             Effect.ensuring(release),
             Effect.forkIn(serviceScope),
@@ -2042,6 +2084,7 @@ export const layer = Layer.effect(
     });
 
     const dispatchPending = Effect.fn("ScheduledTaskService.dispatchPendingWebhooks")(function* () {
+      if ((yield* settings.getSettings.pipe(Effect.orDie)).workPaused) return;
       const now = DateTime.toEpochMillis(yield* localNow);
       yield* sql`UPDATE scheduled_task_webhook_pending SET state = 'dispatching' WHERE state = 'pending' AND due_at <= ${now}`;
       const tasks = yield* sql<{ task_id: ScheduledTaskId }>`

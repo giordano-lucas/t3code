@@ -398,7 +398,16 @@ const LenientThreadOpens = Schema.NullOr(OrchestrationV2ThreadOpens).pipe(
   Schema.catchDecoding(() => Effect.succeedSome(null)),
 );
 
+export const OrchestrationV2WorkPause = Schema.Struct({
+  requestId: CommandId,
+  phase: Schema.Literals(["checkpointing", "stopping", "paused"]),
+  checkpointMessageId: Schema.NullOr(MessageId),
+  resumeRunId: Schema.NullOr(RunId),
+});
+export type OrchestrationV2WorkPause = typeof OrchestrationV2WorkPause.Type;
+
 export const OrchestrationV2AppThread = Schema.Struct({
+  workPause: Schema.optional(Schema.NullOr(OrchestrationV2WorkPause)),
   ...OrchestrationV2CreationFields,
   id: ThreadId,
   projectId: ProjectId,
@@ -1891,6 +1900,7 @@ export type OrchestrationV2LatestVisibleMessageSummary =
   typeof OrchestrationV2LatestVisibleMessageSummary.Type;
 
 export const OrchestrationV2ThreadShell = Schema.Struct({
+  workPause: Schema.optional(Schema.NullOr(OrchestrationV2WorkPause)),
   ...OrchestrationV2CreationFields,
   id: ThreadId,
   projectId: ProjectId,
@@ -3186,6 +3196,23 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
 
 // Excluded from dispatchCommand so only the server can send these.
 const OrchestrationV2InternalCommand = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("thread.work.pause"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    immediate: Schema.optional(Schema.Boolean),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.work.resume"),
+    commandId: CommandId,
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.work.paused"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: CommandId,
+  }),
   // Guest share commands the server issues after checking T3 Connect and the guest token.
   Schema.Struct({
     type: Schema.Literal("thread.guest-share.open"),
@@ -3282,7 +3309,35 @@ export type OrchestrationV2InternalCommand = typeof OrchestrationV2InternalComma
 
 export type OrchestrationV2ServerCommand = OrchestrationV2Command | OrchestrationV2InternalCommand;
 
+export const OrchestrationV2WorkControlInput = Schema.Struct({
+  commandId: CommandId,
+  action: Schema.Literals(["pause", "resume", "status"]),
+  all: Schema.optional(Schema.Boolean),
+  threadId: Schema.optional(ThreadId),
+  immediate: Schema.optional(Schema.Boolean),
+});
+export type OrchestrationV2WorkControlInput = typeof OrchestrationV2WorkControlInput.Type;
+export const OrchestrationV2WorkControlResult = Schema.Struct({
+  allPaused: Schema.Boolean,
+  threads: Schema.Array(
+    Schema.Struct({
+      threadId: ThreadId,
+      title: Schema.String,
+      status: Schema.Literals([
+        "running",
+        "checkpointing",
+        "stopping",
+        "paused",
+        "needs_attention",
+      ]),
+      checkpointSaved: Schema.Boolean,
+    }),
+  ),
+});
+export type OrchestrationV2WorkControlResult = typeof OrchestrationV2WorkControlResult.Type;
+
 export const ORCHESTRATION_V2_WS_METHODS = {
+  controlWork: "orchestration.controlWork",
   dispatchCommand: "orchestration.dispatchCommand",
   getTurnDiff: "orchestration.getTurnDiff",
   getFullThreadDiff: "orchestration.getFullThreadDiff",
@@ -3855,6 +3910,7 @@ export class OrchestrationV2SearchThreadError extends Schema.TaggedError<Orchest
 }
 
 export const OrchestrationV2RpcSchemas = {
+  controlWork: { input: OrchestrationV2WorkControlInput, output: OrchestrationV2WorkControlResult },
   searchThread: {
     input: OrchestrationV2SearchThreadInput,
     output: OrchestrationV2SearchThreadResult,

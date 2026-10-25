@@ -1548,7 +1548,11 @@ const make = Effect.gen(function* () {
         .delegatedTaskResultPending(task.childThreadId, childRun?.delegatedTaskId)
         .pipe(Effect.mapError(threadManagementFailure)));
     const workState =
-      task.result !== null ? "result_available" : heldForRestart ? "working" : taskWorkState;
+      task.result !== null
+        ? "result_available"
+        : heldForRestart || childControls.thread.workPause != null
+          ? "working"
+          : taskWorkState;
     const status =
       task.result !== null
         ? taskStatusForRun(
@@ -1599,6 +1603,9 @@ const make = Effect.gen(function* () {
         model: task.model,
       };
     const result = {
+      ...(childControls.thread.workPause == null
+        ? {}
+        : { pauseState: childControls.thread.workPause.phase }),
       taskId: task.id,
       childThreadId: task.childThreadId,
       link: formatThreadLink(task.childThreadId, childControls.thread.title),

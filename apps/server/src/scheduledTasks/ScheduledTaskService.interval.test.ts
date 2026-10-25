@@ -1,3 +1,4 @@
+import * as ServerSettings from "../serverSettings.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { expect, it } from "@effect/vitest";
 import { ScheduledTaskUpsertInput } from "@t3tools/contracts";
@@ -31,7 +32,9 @@ const dependencies = Layer.mergeAll(
   Layer.mock(ThreadManagementService.ThreadManagementService)({}),
   Layer.mock(SecretRequests.SecretRequests)({}),
 );
-const serviceLayer = ScheduledTaskService.layer.pipe(Layer.provide(dependencies));
+const serviceLayer = ScheduledTaskService.layer
+  .pipe(Layer.provide(ServerSettings.layerTest()))
+  .pipe(Layer.provide(dependencies));
 const decodeInput = Schema.decodeUnknownEffect(ScheduledTaskUpsertInput);
 const input = {
   commandId: "interval-duration",

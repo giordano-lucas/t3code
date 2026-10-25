@@ -488,6 +488,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "pause-agent-work",
+    title: "Pause agent work",
+    to: "/settings/general",
+    scope: "environment-defaults",
+    searchTerms: ["pause resume all agents checkpoint restart reboot shutdown"],
+  },
+  {
     id: "background-activity",
     title: "Background activity",
     to: "/settings/general",

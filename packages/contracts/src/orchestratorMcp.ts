@@ -181,6 +181,7 @@ export const ORCHESTRATOR_MCP_RUNNING_TASK_NEXT =
 const OrchestratorMcpRunningTaskNext = Schema.Literal(ORCHESTRATOR_MCP_RUNNING_TASK_NEXT);
 
 export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
+  pauseState: Schema.optional(Schema.Literals(["checkpointing", "stopping", "paused"])),
   taskId: NodeId,
   childThreadId: ThreadId,
   link: Schema.optional(Schema.String),

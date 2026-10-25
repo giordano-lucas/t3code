@@ -5,6 +5,7 @@ import * as Option from "effect/Option";
 import { Atom } from "effect/reactivity";
 import {
   WS_METHODS,
+  ORCHESTRATION_V2_WS_METHODS,
   type EnvironmentId,
   type OrchestrationV2ShellSnapshot,
 } from "@t3tools/contracts";
@@ -436,6 +437,12 @@ export function createThreadEnvironmentAtoms<R, E>(
         mode: "serial",
         key: ({ environmentId, input }) => JSON.stringify([environmentId, input.threadId]),
       },
+    }),
+    controlWork: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:control-work",
+      tag: ORCHESTRATION_V2_WS_METHODS.controlWork,
+      scheduler,
+      concurrency: { mode: "serial", key: ({ environmentId }) => environmentId },
     }),
     uploadFeedback: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:commands:thread:upload-feedback",
